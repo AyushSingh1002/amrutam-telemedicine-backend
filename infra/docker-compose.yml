@@ -1,0 +1,82 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # PostgreSQL 15+ Primary Database Service
+  # ============================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: amrutam-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: amrutam_user
+      POSTGRES_PASSWORD: amrutam_secure_pass
+      POSTGRES_DB: amrutam_telemedicine
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amrutam_user -d amrutam_telemedicine"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - amrutam-network
+
+  # ============================================================================
+  # Redis 7 In-Memory Cache & BullMQ Message Broker
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: amrutam-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - amrutam-network
+
+  # ============================================================================
+  # Fastify API Service
+  # ============================================================================
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    container_name: amrutam-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      DATABASE_URL: postgresql://amrutam_user:amrutam_secure_pass@postgres:5432/amrutam_telemedicine?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_ACCESS_SECRET: amrutam_jwt_super_secret_access_key_change_in_production_32chars
+      JWT_REFRESH_SECRET: amrutam_jwt_super_secret_refresh_key_change_in_production_32chars
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      PROMETHEUS_METRICS_ENABLED: "true"
+    ports:
+      - "3000:3000"
+    networks:
+      - amrutam-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  amrutam-network:
+    driver: bridge

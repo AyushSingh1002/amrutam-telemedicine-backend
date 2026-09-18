@@ -1,0 +1,405 @@
+openapi: 3.1.0
+info:
+  title: Amrutam Telemedicine Backend API
+  version: 1.0.0
+  description: |
+    Production-grade, highly concurrent, auditable Telemedicine Backend platform.
+    Features:
+    - Zero double-booking concurrency controls (pessimistic row locking)
+    - Strict Idempotency-Key support on mutating operations
+    - Orchestrated booking & payment saga with compensating release
+    - Argon2id hashing, TOTP MFA, rotating refresh tokens
+    - AES-256-GCM encrypted clinical prescription notes
+    - Prometheus metrics and structured audit logging
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+  - url: https://api.amrutam.health
+    description: Production gateway
+
+security:
+  - BearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: "ok" }
+                  timestamp: { type: string, format: date-time }
+
+  /readyz:
+    get:
+      summary: Readiness check (DB & Cache)
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Service dependencies are ready
+        '503':
+          description: Dependency unavailable
+
+  /metrics:
+    get:
+      summary: Prometheus metrics endpoint
+      tags: [System]
+      security: []
+      responses:
+        '200':
+          description: Prometheus formatted metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /api/v1/auth/register:
+    post:
+      summary: Register a new patient, doctor, or admin
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, role, fullName]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+                role: { type: string, enum: [patient, doctor, admin] }
+                fullName: { type: string }
+                phone: { type: string }
+                dateOfBirth: { type: string, format: date }
+                specialty: { type: string }
+                licenseNumber: { type: string }
+                languages: { type: array, items: { type: string } }
+      responses:
+        '201':
+          description: User successfully registered
+        '400':
+          description: Validation error
+        '409':
+          description: Email already registered
+
+  /api/v1/auth/login:
+    post:
+      summary: Authenticate user and issue tokens
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                totpCode: { type: string, description: "Required if MFA is enabled" }
+      responses:
+        '200':
+          description: Successfully authenticated
+        '401':
+          description: Invalid credentials or MFA code required
+
+  /api/v1/auth/refresh:
+    post:
+      summary: Rotate refresh token and issue new access token
+      tags: [Auth]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: Tokens refreshed
+        '401':
+          description: Invalid or revoked refresh token
+
+  /api/v1/auth/mfa/setup:
+    post:
+      summary: Generate TOTP secret and QR code URI for MFA enrollment
+      tags: [Auth]
+      responses:
+        '200':
+          description: MFA secret generated
+
+  /api/v1/auth/mfa/verify:
+    post:
+      summary: Verify TOTP token and activate MFA
+      tags: [Auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, example: "123456" }
+      responses:
+        '200':
+          description: MFA activated successfully
+
+  /api/v1/search/doctors:
+    get:
+      summary: Search doctors with caching (specialty, rating, availability, language)
+      tags: [Search & Doctors]
+      security: []
+      parameters:
+        - name: specialty
+          in: query
+          schema: { type: string }
+        - name: language
+          in: query
+          schema: { type: string }
+        - name: minRating
+          in: query
+          schema: { type: number }
+        - name: availableFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: availableTo
+          in: query
+          schema: { type: string, format: date-time }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 10 }
+      responses:
+        '200':
+          description: Paginated doctor results
+
+  /api/v1/doctors/{doctorId}/slots:
+    post:
+      summary: Doctor publishes availability slots
+      tags: [Search & Doctors]
+      parameters:
+        - name: doctorId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startTime, endTime]
+              properties:
+                startTime: { type: string, format: date-time }
+                endTime: { type: string, format: date-time }
+      responses:
+        '201':
+          description: Slot published
+        '403':
+          description: Forbidden - only the doctor can publish their slots
+        '409':
+          description: Conflict - slot overlapping or already published
+    get:
+      summary: Get open availability slots for a doctor
+      tags: [Search & Doctors]
+      security: []
+      parameters:
+        - name: doctorId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: List of open availability slots
+
+  /api/v1/booking/reserve:
+    post:
+      summary: Reserve an availability slot (Saga Step 1, Idempotent)
+      tags: [Booking & Saga]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slotId, amountCents]
+              properties:
+                slotId: { type: string, format: uuid }
+                amountCents: { type: integer, example: 50000 }
+      responses:
+        '201':
+          description: Slot held and consultation reservation initialized
+        '409':
+          description: Conflict - slot already held or booked
+
+  /api/v1/booking/confirm:
+    post:
+      summary: Confirm payment and consultation (Saga Step 2, Idempotent)
+      tags: [Booking & Saga]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [consultationId, paymentSuccess]
+              properties:
+                consultationId: { type: string, format: uuid }
+                paymentSuccess: { type: boolean }
+      responses:
+        '200':
+          description: Booking confirmed and consultation scheduled
+        '402':
+          description: Payment failed - compensating transaction released the slot
+
+  /api/v1/consultations:
+    get:
+      summary: List authenticated user's consultations
+      tags: [Consultations]
+      responses:
+        '200':
+          description: List of consultations
+
+  /api/v1/consultations/{consultationId}:
+    get:
+      summary: Retrieve details of a consultation
+      tags: [Consultations]
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Consultation details
+
+  /api/v1/consultations/{consultationId}/status:
+    patch:
+      summary: Transition consultation lifecycle state (Optimistic Locking)
+      tags: [Consultations]
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, expectedVersion]
+              properties:
+                status:
+                  type: string
+                  enum: [in_progress, completed, cancelled, no_show]
+                expectedVersion:
+                  type: integer
+      responses:
+        '200':
+          description: State transition succeeded
+        '409':
+          description: Version conflict / invalid state machine transition
+
+  /api/v1/consultations/{consultationId}/prescription:
+    post:
+      summary: Issue medical prescription with AES-256-GCM encrypted notes (Doctor only)
+      tags: [Prescriptions]
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [clinicalNotes, medications]
+              properties:
+                clinicalNotes: { type: string }
+                medications:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, dosage, frequency, duration]
+                    properties:
+                      name: { type: string }
+                      dosage: { type: string }
+                      frequency: { type: string }
+                      duration: { type: string }
+      responses:
+        '201':
+          description: Prescription issued and encrypted successfully
+    get:
+      summary: View consultation prescription (Authorized Doctor or Patient only)
+      tags: [Prescriptions]
+      parameters:
+        - name: consultationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Decrypted prescription details
+
+  /api/v1/admin/analytics:
+    get:
+      summary: Platform analytics rollup (Admin only)
+      tags: [Admin]
+      responses:
+        '200':
+          description: Aggregate stats (consultations/day, no-show rate, time-to-book, doctor utilization)
+
+  /api/v1/admin/audit-logs:
+    get:
+      summary: Query immutable audit logs (Admin only)
+      tags: [Admin]
+      parameters:
+        - name: entityType
+          in: query
+          schema: { type: string }
+        - name: entityId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50 }
+      responses:
+        '200':
+          description: Audit log history
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
