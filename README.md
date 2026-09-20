@@ -232,18 +232,5 @@ k6 run test/load/k6-booking-concurrency.js
 
 ---
 
-## 9. 5-Minute Demo Video Script
-
-A complete, step-by-step walkthrough script with exact timestamps and curl commands is provided in:
-👉 [`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md)
-
-- **0:00–0:30:** Problem definition & architecture diagram.
-- **0:30–2:00:** Live booking concurrency race & idempotency replay.
-- **2:00–3:00:** Consultation lifecycle, AES-256-GCM encrypted prescriptions & audit logs.
-- **3:00–4:00:** Observability walkthrough (Prometheus metrics & `/readyz`).
-- **4:00–5:00:** CI/CD pipeline, test results & security checklist.
-
----
-
 ## 10. License & Compliance
 This project is licensed under the MIT License. Developed in compliance with HIPAA Security Rule Technical Safeguards and DISHA guidelines.
